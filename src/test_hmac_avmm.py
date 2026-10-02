@@ -269,7 +269,7 @@ HARDEN_MSG = b'hardening test message'
 # Fixed START-to-DONE latencies (the LATENCY* parameters in hmac_avmm.v).
 EXPECTED_LATENCY = {
     'tt05-shaman': {'loaded': 2688, 'fresh': 2688},
-    'tt07-sha256': {'loaded': None, 'fresh': None},
+    'tt07-sha256': {'loaded': 1320, 'fresh': 2620},
 }
 
 
