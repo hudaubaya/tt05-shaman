@@ -71,6 +71,7 @@ async def setup(dut):
     dut.avs_write.value = 0
     dut.avs_address.value = 0
     dut.avs_writedata.value = 0
+    dut.tamper_n.value = 1
     dut.reset.value = 1
     await ClockCycles(dut.clk, 5)
     dut.reset.value = 0
@@ -246,3 +247,217 @@ async def test_bus_level_latency(dut):
     assert mac == hmac.new(key, msg, hashlib.sha256).digest()
     dut._log.info(f'one HMAC over the bus (key loaded): {total} cycles, '
                   f'{transfers} transfers incl. STATUS polling')
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: tamper input, constant-time DONE, illegal FSM state.
+# This block is identical in tt05-shaman and tt07-sha256.  It uses Bus, setup,
+# wait_status, mac_of and the register constants defined above.
+# ---------------------------------------------------------------------------
+
+from cocotb.handle import ConstantObject as _Const
+from cocotb.handle import HierarchyArrayObject as _HArr
+from cocotb.handle import HierarchyObject as _HObj
+from cocotb.handle import ModifiableObject as _Mod
+from cocotb.handle import NonHierarchyIndexableObject as _Idx
+from cocotb.utils import get_sim_time
+
+TAMPERED = 16
+CLK_NS = 20          # both testbenches run a 20 ns clock
+P_ILLEGAL = 3
+HARDEN_MSG = b'hardening test message'
+# Fixed START-to-DONE latencies (the LATENCY* parameters in hmac_avmm.v).
+EXPECTED_LATENCY = {
+    'tt05-shaman': {'loaded': 2688, 'fresh': 2688},
+    'tt07-sha256': {'loaded': None, 'fresh': None},
+}
+
+
+def _design(dut):
+    try:
+        dut.core          # the shaman core sits directly in the tt05 wrapper
+        return 'tt05-shaman'
+    except AttributeError:
+        return 'tt07-sha256'
+
+
+def _state(handle, prefix='', out=None):
+    '''Every signal below handle as {name: bitstring}; clk and bus ports excluded.'''
+    if out is None:
+        out = {}
+    for child in handle:
+        name = prefix + child._name
+        if name.endswith('clk') or (not prefix and name.startswith('avs_')):
+            continue
+        if isinstance(child, (_Mod, _Const)):
+            v = child.value
+            out[name] = v.binstr if hasattr(v, 'binstr') else str(v)
+        elif isinstance(child, _Idx):
+            left, right = child._range
+            step = 1 if right >= left else -1
+            for i in range(left, right + step, step):
+                out[f'{name}[{i}]'] = child[i].value.binstr
+        elif isinstance(child, (_HObj, _HArr)):
+            _state(child, name + '.', out)
+    return out
+
+
+def _differs(clean, dirty):
+    '''Signals that differ; x/z bits in the clean snapshot (combinational nets
+    the simulator never evaluated) match anything.'''
+    bad = []
+    for k, c in clean.items():
+        d = dirty.get(k, '')
+        if len(c) != len(d) or any(a not in 'xXzZ' and a != b for a, b in zip(c, d)):
+            bad.append(k)
+    return sorted(bad)
+
+
+async def _reset(dut):
+    dut.tamper_n.value = 1
+    dut.reset.value = 1
+    await ClockCycles(dut.clk, 3)
+    dut.reset.value = 0
+    await ClockCycles(dut.clk, 3)
+
+
+async def _tamper_and_snapshot(dut):
+    '''Pull tamper_n low now, wait 3 rising edges (the first one is the first
+    edge that samples it), return the state 1 ns later.'''
+    dut.tamper_n.value = 0
+    for _ in range(3):
+        await RisingEdge(dut.clk)
+    await Timer(1, units='ns')
+    return _state(dut)
+
+
+@cocotb.test(skip=GateLevelTest)
+async def test_tamper_at_random_cycles(dut):
+    '''Tamper at random points of an operation clears all state within 3
+    cycles (identical to a tamper on an idle, keyless device) and the next
+    START is refused with ERR.'''
+    bus = await setup(dut)
+    rng = random.Random(1717)
+    key = bytes(rng.randrange(256) for _ in range(32))
+
+    # reference: no key ever loaded, same message, tamper held for 3 cycles
+    await bus.write_bytes(MSG, HARDEN_MSG, 14)
+    await bus.write(MSG_LEN, len(HARDEN_MSG))
+    await Timer(rng.randint(1, 19), units='ns')
+    clean = await _tamper_and_snapshot(dut)
+
+    for trial in range(8):
+        await _reset(dut)
+        await bus.write_bytes(KEY, key, 8)
+        await bus.write_bytes(MSG, HARDEN_MSG, 14)
+        await bus.write(MSG_LEN, len(HARDEN_MSG))
+        await bus.write(CTRL, START)
+        delay = rng.randint(0, 2700)
+        await ClockCycles(dut.clk, delay)
+        await Timer(rng.randint(1, 19), units='ns')          # random phase in the cycle
+        dirty = await _tamper_and_snapshot(dut)
+        bad = _differs(clean, dirty)
+        assert not bad, f'trial {trial} (tamper {delay} cycles after START): not cleared: {bad[:12]}'
+        st = await bus.read(STATUS)
+        assert st & TAMPERED and not st & KEY_LOADED
+
+        dut.tamper_n.value = 1
+        await ClockCycles(dut.clk, 6)
+        await bus.write(CTRL, START)
+        st = await bus.read(STATUS)
+        assert st & ERR, f'trial {trial}: START after tamper not refused'
+        assert st & TAMPERED, 'TAMPERED must stay set until reset'
+        dut._log.info(f'tamper trial {trial}: {delay} cycles after START, cleared within 3 cycles')
+
+    await _reset(dut)
+    assert not (await bus.read(STATUS)) & TAMPERED, 'reset clears TAMPERED'
+
+
+async def _timed_op(dut, bus, msg, key, write_key):
+    '''One operation; return (mac, cycles from the START-accept edge to DONE).'''
+    if write_key:
+        await bus.write_bytes(KEY, key, 8)
+    await bus.write_bytes(MSG, msg, 14)
+    await bus.write(MSG_LEN, len(msg))
+    done_at = {}
+
+    async def watch():
+        await RisingEdge(dut.done_flag)
+        done_at['t'] = get_sim_time('ns')
+    watcher = cocotb.start_soon(watch())
+    await bus.write(CTRL, START)          # returns at the accepting edge
+    t0 = get_sim_time('ns')
+    mac_seen_early = False
+    while True:
+        st = await bus.read(STATUS)
+        assert not st & ERR
+        if st & DONE:
+            break
+        assert not st & READY, 'READY visible before DONE'
+        if not mac_seen_early:
+            mac_seen_early = True
+            assert await bus.read(MAC) == 0, 'MAC readable before DONE'
+    await watcher
+    assert int(dut.lat_overrun.value) == 0, 'core finished after the fixed latency'
+    mac = await bus.read_bytes(MAC, 8)
+    assert mac == hmac.new(key, msg, hashlib.sha256).digest()
+    return mac, round((done_at['t'] - t0) / CLK_NS)
+
+
+@cocotb.test(skip=GateLevelTest)
+async def test_constant_latency(dut):
+    '''DONE comes a fixed number of cycles after START, per mode, for all 56
+    message lengths and 20 random keys.  Modes: key already loaded (an
+    operation has run with it), and key freshly written before START.'''
+    bus = await setup(dut)
+    rng = random.Random(56)
+    base_key = bytes(rng.randrange(256) for _ in range(32))
+    results = {}
+    for mode in ('loaded', 'fresh'):
+        lat = set()
+        # 56 message lengths, one key
+        await bus.write_bytes(KEY, base_key, 8)
+        if mode == 'loaded':
+            await mac_of(bus, b'warm-up')
+        for length in range(56):
+            msg = bytes(rng.randrange(256) for _ in range(length))
+            _, c = await _timed_op(dut, bus, msg, base_key, write_key=(mode == 'fresh'))
+            lat.add(c)
+        # 20 random keys
+        for _ in range(20):
+            key = bytes(rng.randrange(256) for _ in range(32))
+            msg = bytes(rng.randrange(256) for _ in range(rng.randint(0, 55)))
+            await bus.write_bytes(KEY, key, 8)
+            if mode == 'loaded':
+                await mac_of(bus, b'warm-up')
+            _, c = await _timed_op(dut, bus, msg, key, write_key=False)
+            lat.add(c)
+        dut._log.info(f'mode {mode}: START-to-DONE latency {sorted(lat)} cycles over 76 operations')
+        assert len(lat) == 1, f'mode {mode}: latency not constant: {sorted(lat)}'
+        results[mode] = lat.pop()
+    dut._log.info(f'constant latencies: {results}')
+    assert results == EXPECTED_LATENCY[_design(dut)], \
+        f'latency differs from the design constants {EXPECTED_LATENCY[_design(dut)]}'
+
+
+@cocotb.test(skip=GateLevelTest)
+async def test_illegal_fsm_state_clears_key(dut):
+    '''A deposited illegal FSM state triggers the CLEAR_KEY action.'''
+    bus = await setup(dut)
+    key = (b'illegal-state key' * 2)[:32]
+    await mac_of(bus, b'before', key)
+    assert (await bus.read(STATUS)) & KEY_LOADED
+    await Timer(1, units='ns')
+    dut.phase.value = P_ILLEGAL
+    for _ in range(3):
+        await RisingEdge(dut.clk)
+    await Timer(1, units='ns')
+    assert int(dut.phase.value) == 0, 'FSM did not recover to idle'
+    for i in range(8):
+        assert int(dut.key_w[i].value) == 0, f'KEY[{i}] not cleared'
+    st = await bus.read(STATUS)
+    assert not st & KEY_LOADED, 'key state not cleared'
+    assert await bus.read_bytes(MAC, 8) == bytes(32)
+    await bus.write(CTRL, START)
+    assert (await bus.read(STATUS)) & ERR
+    assert await mac_of(bus, b'after', key) == hmac.new(key, b'after', hashlib.sha256).digest()
