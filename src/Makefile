@@ -39,5 +39,13 @@ MODULE = test_hmac_ctrl
 SIM_BUILD = sim_build/hmac
 endif
 
+# make AVMM=yes: Avalon-MM wrapper (hmac_avmm.v, test_hmac_avmm.py)
+ifeq ($(AVMM),yes)
+VERILOG_SOURCES = $(PWD)/hmac_avmm.v $(PWD)/hmac_ctrl.v $(PWD)/tt_um_psychogenic_shaman.v
+TOPLEVEL = hmac_avmm
+MODULE = test_hmac_avmm
+SIM_BUILD = sim_build/avmm
+endif
+
 # include cocotb's make rules to take care of the simulator setup
 include $(shell cocotb-config --makefiles)/Makefile.sim
