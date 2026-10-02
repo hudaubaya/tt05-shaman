@@ -31,5 +31,21 @@ TOPLEVEL = tb
 # MODULE is the basename of the Python test file
 MODULE = test
 
+# make HMAC=yes: hmac_ctrl driving the core (tb_hmac.v, test_hmac_ctrl.py)
+ifeq ($(HMAC),yes)
+VERILOG_SOURCES = $(PWD)/tb_hmac.v $(PWD)/hmac_ctrl.v $(PWD)/tt_um_psychogenic_shaman.v
+TOPLEVEL = tb_hmac
+MODULE = test_hmac_ctrl
+SIM_BUILD = sim_build/hmac
+endif
+
+# make AVMM=yes: Avalon-MM wrapper (hmac_avmm.v, test_hmac_avmm.py)
+ifeq ($(AVMM),yes)
+VERILOG_SOURCES = $(PWD)/hmac_avmm.v $(PWD)/hmac_ctrl.v $(PWD)/tt_um_psychogenic_shaman.v
+TOPLEVEL = hmac_avmm
+MODULE = test_hmac_avmm
+SIM_BUILD = sim_build/avmm
+endif
+
 # include cocotb's make rules to take care of the simulator setup
 include $(shell cocotb-config --makefiles)/Makefile.sim
