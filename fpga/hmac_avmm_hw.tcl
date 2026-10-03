@@ -34,6 +34,10 @@ add_interface clock clock end
 set_interface_property clock clockRate 0
 add_interface_port clock clk clk Input 1
 
+# tamper push-button (active low, asynchronous; synchronised inside)
+add_interface tamper conduit end
+add_interface_port tamper tamper_n tamper_n Input 1
+
 # reset (active high, synchronous deassertion from the reset controller)
 add_interface reset reset end
 set_interface_property reset associatedClock clock

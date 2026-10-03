@@ -266,7 +266,7 @@ TAMPERED = 16
 CLK_NS = 20          # both testbenches run a 20 ns clock
 P_ILLEGAL = 3
 HARDEN_MSG = b'hardening test message'
-# Fixed START-to-DONE latencies (the LATENCY* parameters in hmac_avmm.v).
+# Fixed START-to-DONE latencies (the LATENCY* parameters in the wrapper RTL).
 EXPECTED_LATENCY = {
     'tt05-shaman': {'loaded': 2688, 'fresh': 2688},
     'tt07-sha256': {'loaded': 1320, 'fresh': 2620},

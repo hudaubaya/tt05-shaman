@@ -1,7 +1,7 @@
 # Platform Designer system with both HMAC slaves at different addresses:
 #
 #   hmac_tt05  (tt05-shaman hmac_avmm)        base 0x0000, span 0x100
-#   hmac_tt07  (tt07-sha256 hmac_avmm)        base 0x1000, span 0x100
+#   hmac_tt07  (tt07-sha256 hmac07_avmm)      base 0x1000, span 0x100
 #
 # An Avalon-MM bridge (exported as hmac_s0) fronts both slaves; connect it to
 # the HPS h2f_lw_axi_master in the DE10-Nano GHRD, so the slaves appear at
@@ -12,16 +12,12 @@
 # Generate with:  qsys-script --script=hmac_dual_system.tcl
 #                 (with both repositories' fpga/ directories on the IP search path)
 #
-# PREREQUISITES - this system does not elaborate yet:
-#   1. Both repositories define Verilog modules hmac_avmm and hmac_ctrl, which
-#      cannot coexist in one Quartus project.  The tt07 modules must be renamed
-#      (e.g. hmac07_avmm, hmac07_ctrl), together with its hw.tcl, Makefile and
-#      tests.
-#   2. Both hmac_avmm_hw.tcl files register the component name hmac_avmm; the
-#      tt07 one must become hmac07_avmm (assumed below).
-#   3. Both hw.tcl files must export the new tamper_n port as a conduit
-#      interface named "tamper".
-# None of this has been run in Quartus/Platform Designer.
+# Requirements (met in both repositories):
+#   - the tt07 modules and component are named hmac07_avmm / hmac07_ctrl, so
+#     they do not clash with tt05's hmac_avmm / hmac_ctrl;
+#   - both hw.tcl files export tamper_n as a conduit interface named "tamper".
+# The combined RTL compiles and has been simulated behind an equivalent
+# address decoder; this script itself has not been run in Platform Designer.
 
 package require -exact qsys 16.1
 
