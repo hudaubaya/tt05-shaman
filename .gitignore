@@ -8,3 +8,6 @@ src/__pycache__/
 src/results.xml
 src/user_config.tcl
 fpga/build/
+fpga/sim_dual/sim_build
+fpga/sim_dual/__pycache__/
+fpga/sim_dual/results.xml
